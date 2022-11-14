@@ -45,12 +45,8 @@ where
 
     fn parse_n_bytes(&mut self, n: usize) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0; n];
-
-        let r = self.read(&mut bytes)?;
-
-        println!("The bytes: {:?}", &bytes[..r]);
-
-        if r < n {
+        
+        if self.read(&mut bytes)? < n {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Expected more bytes than were read",

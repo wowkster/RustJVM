@@ -1,5 +1,7 @@
 use std::{env, path::PathBuf};
 
+use rust_jvm::interpreter::run_main;
+
 fn main() {
     let args: Vec<_> = env::args().collect();
 
@@ -8,7 +10,7 @@ fn main() {
     let class = rust_jvm::class::parse_class_file(&PathBuf::from(file_name))
         .expect("Could not parse class file");
 
-    println!("{:#?}", class);
+    // println!("{:#?}", class);
 
     assert_eq!(
         &class.magic, b"\xCA\xFE\xBA\xBE",
@@ -18,4 +20,6 @@ fn main() {
 
     assert_eq!(class.get_super_class_name(), "java/lang/Object");
     assert_eq!(class.get_this_class_name(), "Main");
+
+    run_main(&class).expect("Error running main()");
 }
