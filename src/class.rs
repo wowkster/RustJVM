@@ -1,5 +1,9 @@
-use crate::bytes::ByteParseable;
-use std::{fs::File, io, path::PathBuf};
+use crate::bytes::ByteParsable;
+use std::{
+    fs::File,
+    io::{self, Cursor, Read},
+    path::PathBuf,
+};
 
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -7,8 +11,17 @@ use strum_macros::EnumIter;
 /**
  * Represents a structure that can be parsed from a file reader
  */
-trait Parseable {
-    fn parse(f: &mut File) -> io::Result<Self>
+trait Parsable {
+    fn parse(f: &mut dyn Read) -> io::Result<Self>
+    where
+        Self: Sized;
+}
+
+/**
+ * Represents a structure that can be parsed from a file reader and a class constant poll context
+ */
+trait ClassParsable {
+    fn parse(constant_pool: &dyn ConstantPool, f: &mut dyn Read) -> io::Result<Self>
     where
         Self: Sized;
 }
@@ -23,6 +36,8 @@ pub struct ClassFile {
     pub access_flags: Vec<ClassAccessFlags>,
     pub this_class: u16,
     pub super_class: u16,
+    pub methods: Vec<MethodInfo>,
+    pub attributes: Vec<AttributeInfo>,
 }
 
 #[allow(non_snake_case, non_upper_case_globals)]
@@ -108,8 +123,262 @@ pub enum ClassAccessFlags {
     Enum = 0x4000,
 }
 
-impl Parseable for ClassFile {
-    fn parse(f: &mut File) -> io::Result<ClassFile> {
+#[derive(Debug, EnumIter, Clone, Copy)]
+pub enum MethodAccessFlags {
+    Public = 0x0001,
+    Private = 0x0002,
+    Protected = 0x0004,
+    Static = 0x0008,
+    Final = 0x0010,
+    Synchronized = 0x0020,
+    Bridge = 0x0040,
+    VarArgs = 0x0080,
+    Native = 0x0100,
+    Abstract = 0x0400,
+    Strict = 0x0800,
+    Synthetic = 0x1000,
+}
+
+#[derive(Debug)]
+pub struct MethodInfo {
+    pub access_flags: Vec<MethodAccessFlags>,
+    pub name_index: u16,
+    pub name: String,
+    pub descriptor_index: u16,
+    pub descriptor: String,
+    pub attributes: Vec<AttributeInfo>,
+}
+
+#[derive(Debug)]
+pub struct AttributeInfo {
+    pub attribute_name_index: u16,
+    pub attribute_name: String,
+    pub attribute: AttributeKind,
+}
+
+#[derive(Debug)]
+pub enum AttributeKind {
+    ConstantValue {
+        constant_value_index: u16,
+    },
+    Code {
+        max_stack: u16,
+        max_locals: u16,
+        code: Vec<u8>,
+        exception_table: Vec<Exception>,
+        attributes: Vec<AttributeInfo>,
+    },
+    StackMapTable,
+    Exceptions,
+    InnerClasses,
+    EnclosingMethod,
+    Synthetic,
+    Signature,
+    SourceFile {
+        source_file_index: u16,
+        source_file_value: String,
+    },
+    SourceDebugExtension,
+    LineNumberTable {
+        line_number_table: Vec<LineNumber>,
+    },
+    LocalVariableTable,
+    LocalVariableTypeTable,
+    Deprecated,
+    RuntimeVisibleAnnotations,
+    RuntimeInvisibleAnnotations,
+    RuntimeVisibleParameterAnnotations,
+    RuntimeInvisibleParameterAnnotations,
+    AnnotationDefault,
+    BootstrapMethods,
+    Other {
+        bytes: Vec<u8>,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Exception {
+    start_pc: u16,
+    end_pc: u16,
+    handler_pc: u16,
+    catch_type: u16,
+}
+
+impl Parsable for Exception {
+    fn parse(mut f: &mut dyn Read) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Exception {
+            start_pc: f.parse_u2()?,
+            end_pc: f.parse_u2()?,
+            handler_pc: f.parse_u2()?,
+            catch_type: f.parse_u2()?,
+        })
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct LineNumber {
+    start_pc: u16,
+    line_number: u16,
+}
+
+impl Parsable for LineNumber {
+    fn parse(mut f: &mut dyn Read) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(LineNumber {
+            start_pc: f.parse_u2()?,
+            line_number: f.parse_u2()?,
+        })
+    }
+}
+
+impl ClassParsable for AttributeInfo {
+    fn parse(constant_pool: &dyn ConstantPool, mut f: &mut dyn Read) -> io::Result<AttributeInfo> {
+        let attribute_name_index = f.parse_u2()?;
+
+        let attribute_name = constant_pool
+            .get_utf8_from_index(attribute_name_index)
+            .expect("Expected value at attribute_name_index to be utf-8")
+            .clone();
+
+        println!("==== Parsing attribute: {attribute_name}");
+
+        let attribute_length = f.parse_u4()?;
+
+        let bytes = f.parse_n_bytes(attribute_length as usize)?;
+        let mut attribute_bytes = Cursor::new(&bytes);
+
+        let attribute: AttributeKind = match attribute_name.as_str() {
+            "ConstantValue" => AttributeKind::ConstantValue {
+                constant_value_index: attribute_bytes.parse_u2()?,
+            },
+            "Code" => {
+                let max_stack = attribute_bytes.parse_u2()?;
+                let max_locals = attribute_bytes.parse_u2()?;
+
+                let code_length = attribute_bytes.parse_u4()?;
+
+                println!("code_length = {code_length}");
+
+                println!("attribute_bytes = {attribute_bytes:?}");
+
+                let code = attribute_bytes.parse_n_bytes(code_length as usize)?;
+
+                let exception_table_length = attribute_bytes.parse_u2()?;
+
+                let mut exception_table = Vec::with_capacity(exception_table_length as usize);
+
+                for _ in 0..exception_table_length {
+                    exception_table.push(Exception::parse(&mut attribute_bytes)?);
+                }
+
+                let attributes_count = attribute_bytes.parse_u2()?;
+
+                let mut attributes: Vec<AttributeInfo> =
+                    Vec::with_capacity(attributes_count as usize);
+
+                for _ in 0..attributes_count {
+                    attributes.push(AttributeInfo::parse(constant_pool, &mut attribute_bytes)?);
+                }
+
+                AttributeKind::Code {
+                    max_stack,
+                    max_locals,
+                    code,
+                    exception_table,
+                    attributes,
+                }
+            }
+            "SourceFile" => {
+                let source_file_index = attribute_bytes.parse_u2()?;
+
+                AttributeKind::SourceFile {
+                    source_file_index,
+                    source_file_value: constant_pool
+                        .get_utf8_from_index(source_file_index)
+                        .expect("Expected source file name to be utf-8")
+                        .clone(),
+                }
+            }
+            "LineNumberTable" => {
+                let line_number_table_length = attribute_bytes.parse_u2()?;
+
+                let mut line_number_table: Vec<LineNumber> =
+                    Vec::with_capacity(line_number_table_length as usize);
+
+                for _ in 0..line_number_table_length {
+                    line_number_table.push(LineNumber::parse(&mut attribute_bytes)?);
+                }
+
+                AttributeKind::LineNumberTable { line_number_table }
+            }
+            _ => {
+                eprintln!("[WARN] Got unexpected attribute kind with name: {attribute_name}");
+                AttributeKind::Other {
+                    bytes: bytes.to_vec(),
+                }
+            }
+        };
+
+        Ok(AttributeInfo {
+            attribute_name_index,
+            attribute_name,
+            attribute,
+        })
+    }
+}
+
+impl ClassParsable for MethodInfo {
+    fn parse(constant_pool: &dyn ConstantPool, mut f: &mut dyn Read) -> io::Result<MethodInfo> {
+        let access_flags_byte = f.parse_u2()?;
+
+        let mut access_flags: Vec<MethodAccessFlags> = Vec::new();
+
+        for flag in MethodAccessFlags::iter() {
+            if access_flags_byte & flag.clone() as u16 != 0 {
+                access_flags.push(flag)
+            }
+        }
+
+        let name_index = f.parse_u2()?;
+        let name = constant_pool
+            .get_utf8_from_index(name_index)
+            .expect("Expected value at attribute_name_index to be utf-8")
+            .clone();
+
+        let descriptor_index = f.parse_u2()?;
+        let descriptor = constant_pool
+            .get_utf8_from_index(descriptor_index)
+            .expect("Expected value at descriptor to be utf-8")
+            .clone();
+
+        let attributes_count = f.parse_u2()?;
+
+        let mut attributes: Vec<AttributeInfo> = Vec::with_capacity(attributes_count as usize);
+
+        for _ in 0..attributes_count {
+            attributes.push(AttributeInfo::parse(constant_pool, f)?);
+        }
+
+        Ok(MethodInfo {
+            access_flags,
+            name_index,
+            name,
+            descriptor_index,
+            descriptor,
+            attributes,
+        })
+    }
+}
+
+impl Parsable for ClassFile {
+    fn parse(mut f: &mut dyn Read) -> io::Result<ClassFile> {
         let magic = f.parse_u4_as_bytes()?;
         let minor_version = f.parse_u2()?;
         let major_version = f.parse_u2()?;
@@ -151,14 +420,18 @@ impl Parseable for ClassFile {
 
         let methods_count = f.parse_u2()?;
 
+        let mut methods: Vec<MethodInfo> = Vec::with_capacity(methods_count as usize);
+
         for _ in 0..methods_count {
-            todo!("Implement methods parsing");
+            methods.push(MethodInfo::parse(&constant_pool, f)?);
         }
 
         let attributes_count = f.parse_u2()?;
 
+        let mut attributes: Vec<AttributeInfo> = Vec::with_capacity(methods_count as usize);
+
         for _ in 0..attributes_count {
-            todo!("Implement attribute parsing");
+            attributes.push(AttributeInfo::parse(&constant_pool, f)?);
         }
 
         Ok(ClassFile {
@@ -169,22 +442,28 @@ impl Parseable for ClassFile {
             access_flags,
             this_class,
             super_class,
+            methods,
+            attributes,
         })
     }
 }
 
 impl ClassFile {
     pub fn get_super_class_name(&self) -> &String {
-        self.constant_pool.get_class_name_from_index(self.super_class).expect("Could not find name of super class")
+        self.constant_pool
+            .get_class_name_from_index(self.super_class)
+            .expect("Could not find name of super class")
     }
 
     pub fn get_this_class_name(&self) -> &String {
-        self.constant_pool.get_class_name_from_index(self.this_class).expect("Could not find name of this class")
+        self.constant_pool
+            .get_class_name_from_index(self.this_class)
+            .expect("Could not find name of this class")
     }
 }
 
-impl Parseable for ConstantPoolInfo {
-    fn parse(f: &mut File) -> io::Result<ConstantPoolInfo> {
+impl Parsable for ConstantPoolInfo {
+    fn parse(mut f: &mut dyn Read) -> io::Result<ConstantPoolInfo> {
         let tag = f.parse_u1()?;
 
         let info = match tag {
@@ -256,6 +535,7 @@ impl Parseable for ConstantPoolInfo {
 pub trait ConstantPool {
     fn get_value(&self, index: u16) -> &ConstantPoolInfo;
     fn get_class_name_from_index(&self, index: u16) -> Result<&String, ()>;
+    fn get_utf8_from_index(&self, index: u16) -> Result<&String, ()>;
 }
 
 /**
@@ -273,6 +553,13 @@ impl ConstantPool for Vec<ConstantPoolInfo> {
 
         let name = self.get_value(*name_index);
         let ConstantPoolInfo::Utf8 { value } = name else { return Err(()); };
+
+        Ok(&value)
+    }
+
+    fn get_utf8_from_index(&self, index: u16) -> Result<&String, ()> {
+        let utf8 = self.get_value(index);
+        let ConstantPoolInfo::Utf8 { value } = utf8 else { return Err(()); };
 
         Ok(&value)
     }

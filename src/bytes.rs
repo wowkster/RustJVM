@@ -1,10 +1,12 @@
+use std::io;
 use std::io::prelude::*;
-use std::{fs::File, io};
 
-pub trait ByteParseable {
+pub trait ByteParsable {
     fn parse_u1_as_bytes(&mut self) -> io::Result<[u8; 1]>;
     fn parse_u2_as_bytes(&mut self) -> io::Result<[u8; 2]>;
     fn parse_u4_as_bytes(&mut self) -> io::Result<[u8; 4]>;
+
+    fn parse_n_bytes(&mut self, n: usize) -> io::Result<Vec<u8>>;
 
     fn parse_u1(&mut self) -> io::Result<u8>;
     fn parse_u2(&mut self) -> io::Result<u16>;
@@ -19,7 +21,10 @@ pub trait ByteParseable {
     fn parse_utf8(&mut self, len: u16) -> io::Result<String>;
 }
 
-impl ByteParseable for File {
+impl<T> ByteParsable for T
+where
+    T: Read
+{
     fn parse_u1_as_bytes(&mut self) -> io::Result<[u8; 1]> {
         let mut buf = [0; 1];
         self.read(&mut buf)?;
@@ -36,6 +41,23 @@ impl ByteParseable for File {
         let mut buf = [0; 4];
         self.read(&mut buf)?;
         Ok(buf)
+    }
+
+    fn parse_n_bytes(&mut self, n: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = vec![0; n];
+
+        let r = self.read(&mut bytes)?;
+
+        println!("The bytes: {:?}", &bytes[..r]);
+
+        if r < n {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Expected more bytes than were read",
+            ));
+        }
+
+        Ok(bytes)
     }
 
     fn parse_u1(&mut self) -> io::Result<u8> {

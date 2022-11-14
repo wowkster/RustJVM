@@ -1,7 +1,5 @@
 use std::{env, path::PathBuf};
 
-use rust_jvm::class::ConstantPool;
-
 fn main() {
     let args: Vec<_> = env::args().collect();
 
